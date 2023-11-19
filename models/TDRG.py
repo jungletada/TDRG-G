@@ -61,9 +61,6 @@ class TDRG(nn.Module):
             model.relu,
             model.maxpool,
             model.layer1,
-            # model.layer2,
-            # model.layer3,
-            # model.layer4,
         )
         self.layer2 = model.layer2
         self.layer3 = model.layer3
@@ -220,9 +217,10 @@ class TDRG(nn.Module):
         # semantic relation
         # semantic-aware constraints
         out_sac = self.forward_constraint(x4)
+       
         # graph nodes
         V = self.build_nodes(x4, f4)
-        # print('V', V.shape)
+        
         # joint correlation
         A_s = self.build_joint_correlation_matrix(f3, f4, f5, V)
         G = self.forward_gcn(A_s, V) + V
