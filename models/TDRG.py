@@ -112,6 +112,7 @@ class TDRG(nn.Module):
         self.gcn_classifier = nn.Conv1d(self.transformer_dim + self.gcn_dim, self.num_classes, 1)
 
     def forward_backbone(self, x):
+        # 1. forward ReNet101 backbone
         x1 = self.layer1(x)
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
@@ -137,7 +138,7 @@ class TDRG(nn.Module):
         return x3, x4, x5
 
     def forward_transformer(self, x3, x4):
-        # cross scale attention
+        # 2. forward cross scale attention and transformer unit
         x5 = self.transform_7(x4)
         x4 = self.transform_14(x4)
         x3 = self.transform_28(x3)
@@ -167,16 +168,18 @@ class TDRG(nn.Module):
         feat5 = self.GMP(feat5).view(feat5.shape[0], -1)
 
         feat = torch.cat((feat3, feat4, feat5), dim=1)
-        feat = self.trans_classifier(feat)
+        feat = self.trans_classifier(feat) # Linear --> cls
 
         return f3, f4, f5, feat
 
     def forward_constraint(self, x):
+        # 3. classification constraint
         activations = self.constraint_classifier(x)
         out = self.kmp(activations)
         return out
 
     def build_nodes(self, x, f4):
+        # build nodes for GCN
         mask = self.constraint_classifier(x)
         mask = mask.view(mask.size(0), mask.size(1), -1)
         mask = torch.sigmoid(mask)
@@ -193,6 +196,7 @@ class TDRG(nn.Module):
         return nodes
 
     def build_joint_correlation_matrix(self, f3, f4, f5, x):
+        # 5. build joint correlation matrix
         f4 = self.GAP1d(f4)
         f3 = self.GAP1d(f3)
         f5 = self.GAP1d(f5)
@@ -209,22 +213,26 @@ class TDRG(nn.Module):
         return joint_correlation
 
     def forward(self, x):
+        # 1. forward resnet backbone
         x2, x3, x4 = self.forward_backbone(x)
 
-        # structural relation
+        # 2. structural relation
         f3, f4, f5, out_trans = self.forward_transformer(x3, x4)
 
-        # semantic relation
-        # semantic-aware constraints
+        # 3. semantic-aware constraints
         out_sac = self.forward_constraint(x4)
        
-        # graph nodes
+        # 4. graph nodes
         V = self.build_nodes(x4, f4)
         
-        # joint correlation
+        # 5. joint correlation
         A_s = self.build_joint_correlation_matrix(f3, f4, f5, V)
+        
+        # 6.forward GCN
         G = self.forward_gcn(A_s, V) + V
         out_gcn = self.gcn_classifier(G)
+        
+        # 7. get GCN cls_logits
         mask_mat = self.mask_mat.detach()
         out_gcn = (out_gcn * mask_mat).sum(-1)
 
