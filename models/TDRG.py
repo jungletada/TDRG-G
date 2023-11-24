@@ -6,6 +6,11 @@ from .trans_utils.transformer import build_transformer
 
 
 class TopKMaxPooling(nn.Module):
+    """
+        Top-K Maxpooling
+        Input: B x C x H x W
+        Return: B x C
+    """
     def __init__(self, kmax=1.0):
         super(TopKMaxPooling, self).__init__()
         self.kmax = kmax
