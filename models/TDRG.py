@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .trans_utils.position_encoding import build_position_encoding
-from .trans_utils.transformer import build_transformer
+from trans_utils.position_encoding import build_position_encoding
+from trans_utils.transformer import build_transformer
 
 
 class TopKMaxPooling(nn.Module):
@@ -83,15 +83,17 @@ class TDRG(nn.Module):
         self.num_decoder_layers = 0
 
         # transformer
+        self.transform_7 = nn.Conv2d(self.in_planes, self.transformer_dim, 3, stride=2)
         self.transform_14 = nn.Conv2d(self.in_planes, self.transformer_dim, 1)
         self.transform_28 = nn.Conv2d(self.in_planes // 2, self.transformer_dim, 1)
-        self.transform_7 = nn.Conv2d(self.in_planes, self.transformer_dim, 3, stride=2)
 
         self.query_embed = nn.Embedding(self.num_queries, self.transformer_dim)
         self.positional_embedding = build_position_encoding(hidden_dim=self.transformer_dim, mode='learned')
-        self.transformer = build_transformer(d_model=self.transformer_dim, nhead=self.n_head,
-                                             num_encoder_layers=self.num_encoder_layers,
-                                             num_decoder_layers=self.num_decoder_layers)
+        self.transformer = build_transformer(
+            d_model=self.transformer_dim, 
+            nhead=self.n_head,
+            num_encoder_layers=self.num_encoder_layers,
+            num_decoder_layers=self.num_decoder_layers)
 
         self.kmp = TopKMaxPooling(kmax=0.05)
         self.GMP = nn.AdaptiveMaxPool2d(1)
@@ -144,25 +146,30 @@ class TDRG(nn.Module):
 
     def forward_transformer(self, x3, x4):
         # 2. forward cross scale attention and transformer unit
-        x5 = self.transform_7(x4)   # Conv3x3, stride=2
-        x4 = self.transform_14(x4)  # Conv1x1
-        x3 = self.transform_28(x3)  # Conv1x1
-
+        
+        # linear transform to transformer-dim-> downsample
+        x5 = self.transform_7(x4)   # Conv3x3,  ↓64, no padding 
+        x4 = self.transform_14(x4)  # Conv1x1   ↓32
+        x3 = self.transform_28(x3)  # Conv1x1   ↓16 
+    
+        # forward cross scale attention 
         x3, x4, x5 = self.cross_scale_attention(x3, x4, x5)
-
+       
         # transformer encoder
-        mask3 = torch.zeros_like(x3[:, 0, :, :], dtype=torch.bool).cuda()
-        mask4 = torch.zeros_like(x4[:, 0, :, :], dtype=torch.bool).cuda()
-        mask5 = torch.zeros_like(x5[:, 0, :, :], dtype=torch.bool).cuda()
+        mask3 = torch.zeros_like(x3[:, 0, :, :], dtype=torch.bool, device=x3.device)
+        mask4 = torch.zeros_like(x4[:, 0, :, :], dtype=torch.bool, device=x4.device)
+        mask5 = torch.zeros_like(x5[:, 0, :, :], dtype=torch.bool, device=x5.device)
 
         pos3 = self.positional_embedding(x3)
         pos4 = self.positional_embedding(x4)
         pos5 = self.positional_embedding(x5)
-
-        _, feat3 = self.transformer(x3, mask3, self.query_embed.weight, pos3)
-        _, feat4 = self.transformer(x4, mask4, self.query_embed.weight, pos4)
-        _, feat5 = self.transformer(x5, mask5, self.query_embed.weight, pos5)
-
+        
+       
+        # forward transformer unit 
+        _, feat3 = self.transformer(x3, mask3, self.query_embed.weight, pos3) # ↓16 
+        _, feat4 = self.transformer(x4, mask4, self.query_embed.weight, pos4) # ↓32
+        _, feat5 = self.transformer(x5, mask5, self.query_embed.weight, pos5) # ↓64
+        
         # f3 f4 f5: structural guidance -> B x C x N
         f3 = feat3.view(feat3.shape[0], feat3.shape[1], -1).detach()
         f4 = feat4.view(feat4.shape[0], feat4.shape[1], -1).detach()
@@ -172,7 +179,7 @@ class TDRG(nn.Module):
         feat3 = self.GMP(feat3).view(feat3.shape[0], -1)
         feat4 = self.GMP(feat4).view(feat4.shape[0], -1)
         feat5 = self.GMP(feat5).view(feat5.shape[0], -1)
-
+        
         feat = torch.cat((feat3, feat4, feat5), dim=1)
         feat = self.trans_classifier(feat) # Linear -> cls_logits
 
@@ -191,16 +198,20 @@ class TDRG(nn.Module):
         mask = self.constraint_classifier(x) # Conv1x1
         mask = mask.view(mask.size(0), mask.size(1), -1)
         mask = torch.sigmoid(mask)
-        mask = mask.transpose(1, 2) # B x N x C
-
+        mask = mask.transpose(1, 2) # B x N x Cls
+        
         x = self.gcn_dim_transform(x) # Conv1x1
-        x = x.view(x.size(0), x.size(1), -1) # B x C x N
-        v_g = torch.matmul(x, mask) # B x N x N
-
-        v_t = torch.matmul(f4, mask) # (B x C x N) (B x N x C)
-        v_t = v_t.detach() # B x N x C
+        x = x.view(x.size(0), x.size(1), -1) # B x Cg x N
+        
+        v_g = torch.matmul(x, mask) # B x Cg x Cls
+        
+        v_t = torch.matmul(f4, mask) # (B x Ct x N) (B x N x Cls)
+        v_t = v_t.detach() # B x Ct x Cls
+        
         v_t = self.guidance_transform(v_t) # Conv1d 1x1
-        nodes = torch.cat((v_g, v_t), dim=1)
+        
+        nodes = torch.cat((v_g, v_t), dim=1) # B x (Cg+Ct) x Cls
+       
         return nodes
 
     def build_joint_correlation_matrix(self, f3, f4, f5, x):
@@ -222,16 +233,17 @@ class TDRG(nn.Module):
 
     def forward(self, x):
         # 1. forward resnet backbone
-        x2, x3, x4 = self.forward_backbone(x)
-
-        # 2. structural relation
+        
+        _, x3, x4 = self.forward_backbone(x) # _, ↓16, ↓32
+        
+        # 2. structural relation (B x C x N) and (B x C) as logits
         f3, f4, f5, out_trans = self.forward_transformer(x3, x4)
 
         # 3. semantic-aware constraints
         out_sac = self.forward_constraint(x4)
-       
+        
         # 4. graph nodes (Why f4?)
-        V = self.build_nodes(x4, f4)
+        V = self.build_nodes(x4, f4) # B x (Cg+Ct) x Cls
         
         # 5. joint correlation
         A_s = self.build_joint_correlation_matrix(f3, f4, f5, V)
@@ -243,7 +255,7 @@ class TDRG(nn.Module):
         # 7. get GCN cls_logits
         mask_mat = self.mask_mat.detach()
         out_gcn = (out_gcn * mask_mat).sum(-1)
-
+        # return three output logits with B x C
         return out_trans, out_gcn, out_sac
 
     def get_config_optim(self, lr, lrp):
@@ -254,3 +266,14 @@ class TDRG(nn.Module):
                 {'params': large_lr_layers, 'lr': lr},
                 ]
 
+
+if __name__ == '__main__':
+    import torchvision
+    model_dict = {'TDRG': TDRG}
+    res101 = torchvision.models.resnet101(pretrained=True)
+    model = TDRG(res101, num_classes=11)
+
+    img_input = torch.randn(2, 3, 224, 224)
+    with torch.no_grad():
+        out_trans, out_gcn, out_sac = model(img_input)
+        
