@@ -163,12 +163,12 @@ class TDRG(nn.Module):
         _, feat4 = self.transformer(x4, mask4, self.query_embed.weight, pos4)
         _, feat5 = self.transformer(x5, mask5, self.query_embed.weight, pos5)
 
-        # f3 f4 f5: structural guidance
+        # f3 f4 f5: structural guidance -> B x C x N
         f3 = feat3.view(feat3.shape[0], feat3.shape[1], -1).detach()
         f4 = feat4.view(feat4.shape[0], feat4.shape[1], -1).detach()
         f5 = feat5.view(feat5.shape[0], feat5.shape[1], -1).detach()
         
-        # AdaptiveMaxPool2d
+        # AdaptiveMaxPool2d -> B x C
         feat3 = self.GMP(feat3).view(feat3.shape[0], -1)
         feat4 = self.GMP(feat4).view(feat4.shape[0], -1)
         feat5 = self.GMP(feat5).view(feat5.shape[0], -1)
@@ -197,8 +197,8 @@ class TDRG(nn.Module):
         x = x.view(x.size(0), x.size(1), -1) # B x C x N
         v_g = torch.matmul(x, mask) # B x N x N
 
-        v_t = torch.matmul(f4, mask) # (B x C) (B x N x C)
-        v_t = v_t.detach() # (B x N)
+        v_t = torch.matmul(f4, mask) # (B x C x N) (B x N x C)
+        v_t = v_t.detach() # B x N x C
         v_t = self.guidance_transform(v_t) # Conv1d 1x1
         nodes = torch.cat((v_g, v_t), dim=1)
         return nodes
@@ -230,13 +230,13 @@ class TDRG(nn.Module):
         # 3. semantic-aware constraints
         out_sac = self.forward_constraint(x4)
        
-        # 4. graph nodes
+        # 4. graph nodes (Why f4?)
         V = self.build_nodes(x4, f4)
         
         # 5. joint correlation
         A_s = self.build_joint_correlation_matrix(f3, f4, f5, V)
         
-        # 6.forward GCN
+        # 6.forward GCN (transformer_dim + gcn_dim)
         G = self.forward_gcn(A_s, V) + V
         out_gcn = self.gcn_classifier(G)
         
