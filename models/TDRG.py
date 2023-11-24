@@ -144,9 +144,9 @@ class TDRG(nn.Module):
 
     def forward_transformer(self, x3, x4):
         # 2. forward cross scale attention and transformer unit
-        x5 = self.transform_7(x4)
-        x4 = self.transform_14(x4)
-        x3 = self.transform_28(x3)
+        x5 = self.transform_7(x4)   # Conv3x3, stride=2
+        x4 = self.transform_14(x4)  # Conv1x1
+        x3 = self.transform_28(x3)  # Conv1x1
 
         x3, x4, x5 = self.cross_scale_attention(x3, x4, x5)
 
@@ -167,36 +167,39 @@ class TDRG(nn.Module):
         f3 = feat3.view(feat3.shape[0], feat3.shape[1], -1).detach()
         f4 = feat4.view(feat4.shape[0], feat4.shape[1], -1).detach()
         f5 = feat5.view(feat5.shape[0], feat5.shape[1], -1).detach()
-
+        
+        # AdaptiveMaxPool2d
         feat3 = self.GMP(feat3).view(feat3.shape[0], -1)
         feat4 = self.GMP(feat4).view(feat4.shape[0], -1)
         feat5 = self.GMP(feat5).view(feat5.shape[0], -1)
 
         feat = torch.cat((feat3, feat4, feat5), dim=1)
-        feat = self.trans_classifier(feat) # Linear --> cls
+        feat = self.trans_classifier(feat) # Linear -> cls_logits
 
         return f3, f4, f5, feat
 
     def forward_constraint(self, x):
         # 3. classification constraint
+        # constraint_classifier -> Conv1x1
         activations = self.constraint_classifier(x)
+        # Top-K Max Pooling, K = 0.05
         out = self.kmp(activations)
         return out
 
     def build_nodes(self, x, f4):
         # build nodes for GCN
-        mask = self.constraint_classifier(x)
+        mask = self.constraint_classifier(x) # Conv1x1
         mask = mask.view(mask.size(0), mask.size(1), -1)
         mask = torch.sigmoid(mask)
-        mask = mask.transpose(1, 2)
+        mask = mask.transpose(1, 2) # B x N x C
 
-        x = self.gcn_dim_transform(x)
-        x = x.view(x.size(0), x.size(1), -1)
-        v_g = torch.matmul(x, mask)
+        x = self.gcn_dim_transform(x) # Conv1x1
+        x = x.view(x.size(0), x.size(1), -1) # B x C x N
+        v_g = torch.matmul(x, mask) # B x N x N
 
-        v_t = torch.matmul(f4, mask)
-        v_t = v_t.detach()
-        v_t = self.guidance_transform(v_t)
+        v_t = torch.matmul(f4, mask) # (B x C) (B x N x C)
+        v_t = v_t.detach() # (B x N)
+        v_t = self.guidance_transform(v_t) # Conv1d 1x1
         nodes = torch.cat((v_g, v_t), dim=1)
         return nodes
 
