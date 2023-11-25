@@ -38,7 +38,6 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path
 
 
 def main(args):
-
     if args.seed is not None:
         print ('* absolute seed: {}'.format(args.seed))
         random.seed(args.seed)
